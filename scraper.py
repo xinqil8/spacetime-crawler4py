@@ -30,6 +30,7 @@ def extract_next_links(url, resp):
     Returns:
         list: URLs extracted from the page
     """
+    global longest_page
     # Check if response status is valid
     if resp.status != 200 or not resp.raw_response or not hasattr(resp.raw_response, 'content'):
         return []
