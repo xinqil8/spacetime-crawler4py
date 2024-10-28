@@ -19,6 +19,7 @@ def scraper(url, resp):
         list: Valid URLs extracted from the page
     """
     links = extract_next_links(url, resp)
+    # print_statistics()
     return [link for link in links if is_valid(link)]
 
 def extract_next_links(url, resp):
