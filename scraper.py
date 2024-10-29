@@ -3,7 +3,7 @@ import re
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin, urldefrag
 from threading import Lock
-import simhash
+from simhash import Simhash, SimhashIndex
 
 # Global variables
 visited_urls = set()
@@ -11,8 +11,8 @@ word_counts = {}
 longest_page_url = ""
 longest_page_word_count = 0
 redirect_count = Counter()
-# page_hashes = {}
-# index = simhash.SimhashIndex([], k=3)
+page_hashes = {}
+index = SimhashIndex([], k=3)
 
 # Add lock for thread-safe file operations
 output_lock = Lock()
@@ -147,15 +147,15 @@ def extract_next_links(url, resp):
                 if word not in stop_words and not word.isdigit()]
         
         # #check current hash
-        # current_simhash = simhash(text_content)
+        current_simhash = Simhash(text_content)
         
         # # use hash to check similiar page
-        # if index.get_near_dups(current_simhash):
-        #     print(f"Skipping similar page: {url}")
-        #     return []
+        if index.get_near_dups(current_simhash):
+            print(f"Skipping similar page: {url}")
+            return []
 
         # # update simhash
-        # index.add(url, current_simhash)
+        index.add(url, current_simhash)
 
 
         #Update longest page statistics
