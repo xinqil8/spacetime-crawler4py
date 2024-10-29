@@ -3,12 +3,16 @@ import re
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin, urldefrag
 from threading import Lock
+import simhash
 
 # Global variables
 visited_urls = set()
 word_counts = {}
 longest_page_url = ""
 longest_page_word_count = 0
+redirect_count = Counter()
+# page_hashes = {}
+# index = simhash.SimhashIndex([], k=3)
 
 # Add lock for thread-safe file operations
 output_lock = Lock()
@@ -96,6 +100,9 @@ def read_from_output():
         longest_page_word_count = 0
         longest_page_url = ""
 
+
+
+
 def scraper(url, resp, unique_pages, w_counts, longest_url, longest_count):
     global longest_page_word_count, longest_page_url, visited_urls, word_counts
     
@@ -124,10 +131,14 @@ def scraper(url, resp, unique_pages, w_counts, longest_url, longest_count):
     
     return valid_links
 
+
 def extract_next_links(url, resp):
     global longest_page_word_count, longest_page_url, visited_urls, word_counts, refresh_count
-
+    
     links = []
+
+    
+
     if resp.status == 200:
         soup = BeautifulSoup(resp.raw_response.content, 'lxml')
 
@@ -135,7 +146,19 @@ def extract_next_links(url, resp):
         words = [word for word in re.findall(r"\b[a-zA-Z]{2,}\b", text_content) 
                 if word not in stop_words and not word.isdigit()]
         
-        # Update longest page statistics
+        # #check current hash
+        # current_simhash = simhash(text_content)
+        
+        # # use hash to check similiar page
+        # if index.get_near_dups(current_simhash):
+        #     print(f"Skipping similar page: {url}")
+        #     return []
+
+        # # update simhash
+        # index.add(url, current_simhash)
+
+
+        #Update longest page statistics
         if len(words) > longest_page_word_count:
             longest_page_word_count = len(words)
             longest_page_url = url
@@ -148,11 +171,12 @@ def extract_next_links(url, resp):
         for anchor in soup.find_all('a', href=True):
             abs_url, _ = urldefrag(urljoin(url, anchor['href']))
             links.append(abs_url)
+    
 
     return links
 
 def is_valid(url):
-    global longest_page_word_count, longest_page_url, visited_urls, php_blacklist
+    global longest_page_word_count, longest_page_url, visited_urls, php_blacklist, redirect_count
 
     try:
         parsed = urlparse(url)
@@ -166,6 +190,14 @@ def is_valid(url):
         # Ensure the netloc has at least two parts for domain and TLD
         if len(netloc_parts) < 2:
             return False
+        
+        
+        #check if it redirects too many times(more than 5), then its a trap)
+        if redirect_count[url] > 5:
+            return False
+        else:
+            redirect_count[url] += 1
+
 
         # Create a domain string from the last two parts of netloc
         domain = ".".join(netloc_parts[-2:])
