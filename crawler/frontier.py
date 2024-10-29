@@ -1,9 +1,9 @@
 import os
 import shelve
+import time
+from urllib.parse import urlparse
 
-from threading import Thread, RLock
-from queue import Queue, Empty
-
+from threading import RLock
 from utils import get_logger, get_urlhash, normalize
 from scraper import is_valid
 
@@ -12,17 +12,18 @@ class Frontier(object):
         self.logger = get_logger("FRONTIER")
         self.config = config
         self.to_be_downloaded = list()
-        
+        self.lock = RLock()  # Adding a lock for thread safety
+        self.domains_last_accessed = {}  # For storing the last accessed time of domains
+
         if not os.path.exists(self.config.save_file) and not restart:
-            # Save file does not exist, but request to load save.
             self.logger.info(
                 f"Did not find save file {self.config.save_file}, "
                 f"starting from seed.")
         elif os.path.exists(self.config.save_file) and restart:
-            # Save file does exists, but request to start from seed.
             self.logger.info(
                 f"Found save file {self.config.save_file}, deleting it.")
             os.remove(self.config.save_file)
+
         # Load existing save file, or create one if it does not exist.
         self.save = shelve.open(self.config.save_file)
         if restart:
@@ -48,25 +49,37 @@ class Frontier(object):
             f"total urls discovered.")
 
     def get_tbd_url(self):
-        try:
-            return self.to_be_downloaded.pop()
-        except IndexError:
-            return None
+        with self.lock:  # Ensuring thread safety
+            try:
+                url = self.to_be_downloaded.pop()
+                domain = self.get_domain(url)
+                if domain in self.domains_last_accessed:
+                    elapsed_time = time.time() - self.domains_last_accessed[domain]
+                    if elapsed_time < 0.5:
+                        time.sleep(0.5 - elapsed_time)
+                self.domains_last_accessed[domain] = time.time()
+                return url
+            except IndexError:
+                return None
 
     def add_url(self, url):
         url = normalize(url)
-        urlhash = get_urlhash(url)
-        if urlhash not in self.save:
-            self.save[urlhash] = (url, False)
-            self.save.sync()
-            self.to_be_downloaded.append(url)
-    
-    def mark_url_complete(self, url):
-        urlhash = get_urlhash(url)
-        if urlhash not in self.save:
-            # This should not happen.
-            self.logger.error(
-                f"Completed url {url}, but have not seen it before.")
+        with self.lock:  # Ensuring thread safety
+            urlhash = get_urlhash(url)
+            if urlhash not in self.save:
+                self.save[urlhash] = (url, False)
+                self.save.sync()
+                self.to_be_downloaded.append(url)
 
-        self.save[urlhash] = (url, True)
-        self.save.sync()
+    def mark_url_complete(self, url):
+        with self.lock:  # Ensuring thread safety
+            urlhash = get_urlhash(url)
+            if urlhash not in self.save:
+                self.logger.error(
+                    f"Completed url {url}, but have not seen it before.")
+            self.save[urlhash] = (url, True)
+            self.save.sync()
+
+    @staticmethod
+    def get_domain(url):
+        return urlparse(url).netloc
