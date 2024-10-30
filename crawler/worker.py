@@ -1,5 +1,4 @@
 from threading import Event, Thread, Timer
-import signal
 import sys
 import time
 
@@ -9,13 +8,7 @@ from utils.download import download
 from utils import get_logger
 import scraper
 
-# Define the signal handler
-def handle_interrupt(signum, frame):
-    scraper.print_statistics()  # Use scraper's statistics function
-    print("Process paused.")
-    sys.exit(0)
 
-signal.signal(signal.SIGINT, handle_interrupt)
 
 class Worker(Thread):
     def __init__(self, worker_id, config, frontier):
