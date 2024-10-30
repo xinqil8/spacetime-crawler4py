@@ -5,7 +5,6 @@ from urllib.parse import urlparse, urljoin, urldefrag
 from threading import Lock
 from simhash import Simhash, SimhashIndex
 
-# Global variables
 visited_urls = set()
 word_counts = {}
 longest_page_url = ""
@@ -13,10 +12,8 @@ longest_page_word_count = 0
 redirect_count = Counter()
 page_hashes = {}
 index = SimhashIndex([], k=3)
-
-# Add lock for thread-safe file operations
+robots_cache = {}
 output_lock = Lock()
-
 refresh_count = 0
 php_blacklist = Counter()
 count_blacklist = Counter()
@@ -41,6 +38,43 @@ stop_words = set([
     "who's", "whom", "why", "why's", "with", "won't", "would", "wouldn't", "you", "you'd", 
     "you'll", "you're", "you've", "your", "yours", "yourself", "yourselves"
 ])
+
+
+def handle_response_error(resp):
+    """Handle response errors based on status code"""
+    if not resp or not hasattr(resp, 'error'):
+        return False
+        
+    error_code = resp.error
+    
+    # Critical errors that must be handled
+    if error_code == 603:  # Invalid scheme
+        print(f"Error 603: URL scheme must be http or https")
+        return False
+    elif error_code == 604:  # Domain not in spec
+        print(f"Error 604: Domain must be within specified domains")
+        return False
+    elif error_code == 605:  # Invalid file extension
+        print(f"Error 605: Invalid file extension detected")
+        return False
+    elif error_code == 608:  # Robots.txt denial
+        print(f"Error 608: Access denied by robots.txt")
+        return False
+        
+    # Handle other errors we choose to process
+    elif error_code == 607:  # Content too big
+        print(f"Error 607: Content exceeds size limit - {resp.headers.get('content-length', 'unknown')} bytes")
+        return False
+    elif error_code == 606:  # URL parsing error
+        print(f"Error 606: Cannot parse URL")
+        return False
+        
+    # Ignorable errors
+    elif error_code in [600, 601, 602]:  # Request malformed, Download exception, Server failure
+        print(f"Ignorable error {error_code}: Continuing with next URL")
+        return True
+        
+    return True
 
 def write_to_output():
     """Thread-safe function to write stats to output.txt"""
@@ -104,12 +138,13 @@ def read_from_output():
 
 
 def scraper(url, resp, unique_pages, w_counts, longest_url, longest_count):
-    global longest_page_word_count, longest_page_url, visited_urls, word_counts
+    """Main scraper function with error handling"""
+    global longest_page_word_count, longest_page_url, visited_urls, word_counts, refresh_count
     
-    # Initialize from existing data or output.txt
+    # Initialize from existing data
     if len(visited_urls) == 0:
         visited_urls = unique_pages
-        read_from_output()  # Try to restore data from output.txt
+        read_from_output()
     if len(word_counts) == 0:
         word_counts = w_counts
     if longest_page_url == "":
@@ -117,12 +152,31 @@ def scraper(url, resp, unique_pages, w_counts, longest_url, longest_count):
     if longest_page_word_count == 0:
         longest_page_word_count = longest_count
 
+    # Handle response errors
+    if not handle_response_error(resp):
+        return []
+
+    # Check content size (Error 607)
+    if resp.raw_response and 'content-length' in resp.raw_response.headers:
+        content_length = int(resp.raw_response.headers['content-length'])
+        if content_length > 10_000_000:  # 10MB limit example
+            print(f"Error 607: Content too large ({content_length} bytes)")
+            return []
+
     links = extract_next_links(url, resp)
-    valid_links = [link for link in links if is_valid(link)]
+    valid_links = []
+    
+    for link in links:
+        try:
+            if is_valid(link):
+                valid_links.append(link)
+        except Exception as e:
+            print(f"Error 606: Exception in parsing URL {link}: {e}")
+            continue
+
     visited_urls.update(valid_links)
     
-    # Write statistics to output.txt periodically
-    global refresh_count
+    # Periodic output update
     if refresh_count >= 50:
         write_to_output()
         refresh_count = 0
@@ -131,108 +185,86 @@ def scraper(url, resp, unique_pages, w_counts, longest_url, longest_count):
     
     return valid_links
 
-
 def extract_next_links(url, resp):
-    global longest_page_word_count, longest_page_url, visited_urls, word_counts, refresh_count
+    """Extract links with error handling"""
+    global longest_page_word_count, longest_page_url, word_counts
     
     links = []
-
     
-
-    if resp.status == 200:
-        soup = BeautifulSoup(resp.raw_response.content, 'lxml')
-
-        text_content = soup.get_text().lower()
-        words = [word for word in re.findall(r"\b[a-zA-Z]{2,}\b", text_content) 
-                if word not in stop_words and not word.isdigit()]
+    try:
+        if resp.status == 200 and resp.raw_response and resp.raw_response.content:
+            soup = BeautifulSoup(resp.raw_response.content, 'lxml')
+            
+            # Process text content
+            text_content = soup.get_text().lower()
+            words = [word for word in re.findall(r"\b[a-zA-Z]{2,}\b", text_content) 
+                    if word not in stop_words and not word.isdigit()]
+            
+            # Duplicate detection
+            current_simhash = Simhash(text_content)
+            if index.get_near_dups(current_simhash):
+                return []
+            index.add(url, current_simhash)
+            
+            # Update statistics
+            if len(words) > longest_page_word_count:
+                longest_page_word_count = len(words)
+                longest_page_url = url
+            
+            for word in words:
+                word_counts[word] = word_counts.get(word, 0) + 1
+            
+            # Extract links
+            for anchor in soup.find_all('a', href=True):
+                try:
+                    abs_url, _ = urldefrag(urljoin(url, anchor['href']))
+                    links.append(abs_url)
+                except Exception as e:
+                    print(f"Error 606: Failed to parse link {anchor['href']}: {e}")
+                    continue
+                    
+    except Exception as e:
+        print(f"Error 601: Exception in processing page {url}: {e}")
+        return []
         
-        # #check current hash
-        current_simhash = Simhash(text_content)
-        
-        # # use hash to check similiar page
-        if index.get_near_dups(current_simhash):
-            print(f"Skipping similar page: {url}")
-            return []
-
-        # # update simhash
-        index.add(url, current_simhash)
-
-
-        #Update longest page statistics
-        if len(words) > longest_page_word_count:
-            longest_page_word_count = len(words)
-            longest_page_url = url
-
-        # Update word counts
-        for word in words:
-            word_counts[word] = word_counts.get(word, 0) + 1
-
-        # Extract links
-        for anchor in soup.find_all('a', href=True):
-            abs_url, _ = urldefrag(urljoin(url, anchor['href']))
-            links.append(abs_url)
-    
-
     return links
 
-def is_valid(url):
-    global longest_page_word_count, longest_page_url, visited_urls, php_blacklist, redirect_count
 
+def is_valid(url):
+    """Validate URL with comprehensive error handling"""
     try:
         parsed = urlparse(url)
-        # Only allow certain subdomains from 'uci.edu'
-        allowed_subdomains = ["ics", "cs", "informatics", "stat"]
-        allowed_domains = ["uci.edu"]
-
-        # Split the netloc into parts
-        netloc_parts = parsed.netloc.split('.')
-
-        # Ensure the netloc has at least two parts for domain and TLD
-        if len(netloc_parts) < 2:
-            return False
         
-        
-        #check if it redirects too many times(more than 5), then its a trap)
-        if redirect_count[url] > 5:
-            return False
-        else:
-            redirect_count[url] += 1
-
-
-        # Create a domain string from the last two parts of netloc
-        domain = ".".join(netloc_parts[-2:])
-
-        # Check if the domain is in the allowed domains list
-        if domain in allowed_domains:
-            # Check if the subdomain is allowed if it exists
-            if len(netloc_parts) > 2 and netloc_parts[-3] not in allowed_subdomains:
-                return False
-        else:
-            return False
-
-        # Check for repeating directory patterns
-        if is_repeating_path(parsed.path):
-            return False          
-
-        # path is too long, possibly a trap
-        if len(parsed.path.split("/")) > 5:
-            return False
-        
-        # date is possibly a trap
-        date_pattern = r'\d{4}-\d{2}'
-        if re.search(date_pattern, url):
-            return False
-        
-        if url in visited_urls:
-            return False
-        
-        if parsed.query.count("%") >= 3 or parsed.query.count("=") >= 3 or parsed.query.count("&") >= 3:
-            return False
-        
+        # Error 603: Check scheme
         if parsed.scheme not in set(["http", "https"]):
+            print(f"Error 603: Invalid scheme in {url}")
             return False
-
-        # Check file extensions
+            
+        # Error 604: Check domain
+        netloc_parts = parsed.netloc.split('.')
+        if len(netloc_parts) < 2:
+            print(f"Error 604: Invalid domain format in {url}")
+            return False
+            
+        domain = ".".join(netloc_parts[-2:])
+        allowed_subdomains = ["ics", "cs", "informatics", "stat"]
+        
+        # Special case for today.uci.edu
+        if parsed.netloc == "today.uci.edu":
+            if not parsed.path.startswith("/department/information_computer_sciences/"):
+                print(f"Error 604: Invalid today.uci.edu path in {url}")
+                return False
+            return True
+            
+        # Domain validation
+        if domain != "uci.edu":
+            print(f"Error 604: Domain not allowed: {domain}")
+            return False
+        if len(netloc_parts) > 2 and netloc_parts[-3] not in allowed_subdomains:
+            print(f"Error 604: Subdomain not allowed: {netloc_parts[-3]}")
+            return False
+            
+        # Error 605: Check file extension
         if re.match(
             r".*\.(css|js|bmp|gif|jpe?g|ico"
             + r"|png|tiff?|mid|mp2|mp3|mp4"
@@ -242,25 +274,41 @@ def is_valid(url):
             + r"|epub|dll|cnf|tgz|sha1"
             + r"|thmx|mso|arff|rtf|jar|csv"
             + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", parsed.path.lower()):
+            print(f"Error 605: Invalid file extension in {url}")
             return False
-
-        # if a url with .php, it's possible to be a trap
+            
+        # Additional validations
+        if is_repeating_path(parsed.path):
+            return False
+        
+        if len(parsed.path.split("/")) > 5:
+            return False
+            
+        if re.search(r'\d{4}-\d{2}', url):
+            return False
+            
+        if url in visited_urls:
+            return False
+            
+        if parsed.query.count("%") >= 3 or parsed.query.count("=") >= 3 or parsed.query.count("&") >= 3:
+            return False
+            
+        # Trap detection
         php_url = url.strip().split(".php")[0] + ".php"
         if php_blacklist[php_url] > 10:
             return False
-        else:
-            php_blacklist[php_url] += 1
-
-        # if a url's path appears too much time, it's possible to be a trap
+        php_blacklist[php_url] += 1
+        
         if count_blacklist[parsed.netloc + parsed.path] > 10:
             return False
-        else:
-            count_blacklist[parsed.netloc + parsed.path] += 1
-
+        count_blacklist[parsed.netloc + parsed.path] += 1
+        
         return True
+        
     except Exception as e:
-        print(f"An exception occurred for {url}: {e}")
+        print(f"Error 606: Exception in parsing URL {url}: {e}")
         return False
+
 
 def is_repeating_path(path):
     segments = path.strip("/").split('/')
