@@ -4,6 +4,9 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin, urldefrag
 from threading import Lock
 from simhash import Simhash, SimhashIndex
+from collections import defaultdict
+import os
+import json
 
 visited_urls = set()
 word_counts = {}
@@ -39,6 +42,68 @@ stop_words = set([
     "you'll", "you're", "you've", "your", "yours", "yourself", "yourselves"
 ])
 
+def get_all_file_paths(folder_path):
+    """
+    Recursively get all file paths from the given folder.
+    
+    :param folder_path: Path to the folder containing JSON files
+    :return: List of file paths
+    """
+    file_paths = []
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            if file.endswith('.json'):
+                file_paths.append(os.path.join(root, file))
+    return file_paths
+
+def parse_file_and_tokenize(file_path):
+    """
+    Parse a JSON file, extract HTML content, and tokenize.
+    
+    :param file_path: Path to the JSON file containing HTML content
+    :return: List of tokens extracted from the content
+    """
+    # Read the JSON file
+    with open(file_path, 'r', encoding='utf-8') as file:
+        data = json.load(file)
+        
+        # Extract the content field
+        html_content = data.get("content", "")
+        
+        # Parse HTML and extract text
+        soup = BeautifulSoup(html_content, 'html.parser')
+        text_content = soup.get_text().lower()
+        
+        # Tokenize the text content, removing stopwords and digits
+        words = [word for word in re.findall(r"\b[a-zA-Z]{2,}\b", text_content)
+                 if word not in stop_words and not word.isdigit()]
+        
+        return words
+
+def build_inverted_index(file_paths):
+    """
+    Build an inverted index from a list of JSON files.
+    
+    :param file_paths: List of file paths to JSON files containing HTML content
+    :return: Inverted index (dict), with tokens as keys and list of postings as values
+    """
+    inverted_index = defaultdict(list)
+    
+    for file_path in file_paths:
+        tokens = parse_file_and_tokenize(file_path)
+        doc_id = file_path  # Use file path as a document identifier
+        #这边我感觉不太行。他Lecture讲了file path太长可能不适合做id。
+        
+        # Calculate term frequency (TF) for each token in this document
+        term_freq = defaultdict(int)
+        for token in tokens:
+            term_freq[token] += 1
+        
+        # Add postings to the inverted index
+        for token, tf in term_freq.items():
+            inverted_index[token].append({'doc_id': doc_id, 'tf': tf})
+    
+    return inverted_index
 
 def handle_response_error(resp):
     """Handle response errors based on status code"""
